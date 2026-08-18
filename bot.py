@@ -13,6 +13,7 @@ Usage:
     python bot.py --test     # send a test message, then one pass
     python bot.py --dry      # evaluate and print, send nothing
     python bot.py --status   # report current state of every symbol, no alerts
+    python bot.py --probe    # which data venues this machine can reach
 """
 import json, os, sys, time, urllib.parse, urllib.request
 from datetime import datetime, timezone
@@ -68,6 +69,16 @@ _BYBIT_ITV = {"15m": "15", "30m": "30", "1h": "60", "2h": "120", "4h": "240",
               "6h": "360", "12h": "720", "1d": "D"}
 _OKX_ITV = {"15m": "15m", "30m": "30m", "1h": "1H", "2h": "2H", "4h": "4H",
             "6h": "6H", "12h": "12H", "1d": "1D"}
+_GATE_ITV = {"15m": "15m", "30m": "30m", "1h": "1h", "4h": "4h", "1d": "1d"}
+
+# Symbols quoted at a different scale elsewhere: (venue_symbol, price multiplier
+# to bring it back to Binance-perp quoting).
+_ALIAS = {
+    "1000PEPEUSDT": ("PEPEUSDT", 1000.0),
+    "1000SHIBUSDT": ("SHIBUSDT", 1000.0),
+    "1000BONKUSDT": ("BONKUSDT", 1000.0),
+    "1000FLOKIUSDT": ("FLOKIUSDT", 1000.0),
+}
 
 SOURCE_USED = {}      # symbol -> which venue actually answered
 
@@ -78,55 +89,95 @@ def _get(url, timeout=25):
         return json.load(r)
 
 
-def _binance(symbol, interval, limit):
-    k = _get(f"{BASE}?symbol={symbol}&interval={interval}&limit={limit}")
-    df = pd.DataFrame(k, columns=["t", "o", "h", "l", "c", "v", "ct", "q", "n", "tb", "tq", "ig"])
-    return df[["t", "o", "h", "l", "c", "v"]]
+def _binance_perp(sym, itv, limit):
+    k = _get(f"{BASE}?symbol={sym}&interval={itv}&limit={limit}")
+    d = pd.DataFrame(k, columns=["t", "o", "h", "l", "c", "v", "ct", "q", "n", "tb", "tq", "ig"])
+    return d[["t", "o", "h", "l", "c", "v"]], 1.0
 
 
-def _bybit(symbol, interval, limit):
-    itv = _BYBIT_ITV[interval]
-    d = _get(f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}"
-             f"&interval={itv}&limit={min(limit, 1000)}")
-    rows = d["result"]["list"][::-1]          # Bybit returns newest first
-    return pd.DataFrame([r[:6] for r in rows], columns=["t", "o", "h", "l", "c", "v"])
+def _binance_spot_mirror(sym, itv, limit):
+    """Binance's public market-data mirror. Same exchange, spot instead of perp,
+    and unlike fapi it answers from US-hosted CI runners."""
+    s, mult = _ALIAS.get(sym, (sym, 1.0))
+    k = _get(f"https://data-api.binance.vision/api/v3/klines?symbol={s}&interval={itv}&limit={limit}")
+    d = pd.DataFrame(k, columns=["t", "o", "h", "l", "c", "v", "ct", "q", "n", "tb", "tq", "ig"])
+    return d[["t", "o", "h", "l", "c", "v"]], mult
 
 
-def _okx(symbol, interval, limit):
-    inst = symbol.replace("USDT", "") + "-USDT-SWAP"
+def _bybit(sym, itv, limit):
+    d = _get(f"https://api.bybit.com/v5/market/kline?category=linear&symbol={sym}"
+             f"&interval={_BYBIT_ITV[itv]}&limit={min(limit, 1000)}")
+    rows = d["result"]["list"][::-1]
+    return pd.DataFrame([r[:6] for r in rows], columns=["t", "o", "h", "l", "c", "v"]), 1.0
+
+
+def _gate(sym, itv, limit):
+    s, mult = _ALIAS.get(sym, (sym, 1.0))
+    contract = s.replace("USDT", "") + "_USDT"
+    d = _get(f"https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract={contract}"
+             f"&interval={_GATE_ITV[itv]}&limit={min(limit, 1999)}")
+    rows = [[int(r["t"]) * 1000, r["o"], r["h"], r["l"], r["c"], r["v"]] for r in d]
+    return pd.DataFrame(rows, columns=["t", "o", "h", "l", "c", "v"]), mult
+
+
+def _okx(sym, itv, limit):
+    s, mult = _ALIAS.get(sym, (sym, 1.0))
+    inst = s.replace("USDT", "") + "-USDT-SWAP"
     d = _get(f"https://www.okx.com/api/v5/market/candles?instId={inst}"
-             f"&bar={_OKX_ITV[interval]}&limit={min(limit, 300)}")
-    rows = d["data"][::-1]                    # OKX returns newest first
-    return pd.DataFrame([r[:6] for r in rows], columns=["t", "o", "h", "l", "c", "v"])
+             f"&bar={_OKX_ITV[itv]}&limit={min(limit, 300)}")
+    rows = d["data"][::-1]
+    return pd.DataFrame([r[:6] for r in rows], columns=["t", "o", "h", "l", "c", "v"]), mult
+
+
+# Ordered by fidelity to what the strategy was tested on. Binance perp first;
+# its own spot mirror next (same exchange, and reachable from US CI runners);
+# then other venues listing the same pair.
+SOURCES = [("binance-perp", _binance_perp), ("binance-spot", _binance_spot_mirror),
+           ("bybit", _bybit), ("gate", _gate), ("okx", _okx)]
 
 
 def fetch(symbol, interval, limit=400):
-    """Binance first (it is what the strategy was tested on), then Bybit, then OKX.
-
-    GitHub-hosted runners sit on US IPs and Binance answers them with HTTP 451,
-    so a fallback is required for this to work anywhere but a local machine.
-    Bybit lists the same USDT perpetuals under the same tickers, so its bars are
-    the closest substitute.
-    """
+    """Try each venue in turn. Binance and Bybit both answer US IPs with 451, so
+    a GitHub-hosted runner will normally land on the Binance spot mirror."""
     last_err = None
-    for name, fn in (("binance", _binance), ("bybit", _bybit), ("okx", _okx)):
-        for attempt in range(3):
+    for name, fn in SOURCES:
+        for attempt in range(2):
             try:
-                df = fn(symbol, interval, limit)
+                df, mult = fn(symbol, interval, limit)
                 if df is None or len(df) < 60:
                     raise ValueError(f"only {0 if df is None else len(df)} bars")
                 df = df.astype({"t": "int64", "o": float, "h": float,
                                 "l": float, "c": float, "v": float})
+                if mult != 1.0:
+                    for col in ("o", "h", "l", "c"):
+                        df[col] *= mult
                 df = df.drop_duplicates("t").sort_values("t").reset_index(drop=True)
                 SOURCE_USED[symbol] = name
                 return df
             except Exception as e:
                 last_err = f"{name}: {type(e).__name__} {e}"
-                code = getattr(e, "code", None)
-                if code in (451, 403, 401):
-                    break               # geo-blocked, no point retrying this venue
-                time.sleep(1.5 * (attempt + 1))
+                if getattr(e, "code", None) in (451, 403, 401):
+                    break            # geo-blocked; another attempt will not help
+                time.sleep(1.0 * (attempt + 1))
     raise RuntimeError(last_err)
+
+
+def probe():
+    """Report which venues this machine can actually reach."""
+    syms = load_watchlist()
+    print(f"{'source':<16}{'reachable':<11}{'symbols covered':<18}note")
+    print("-" * 74)
+    for name, fn in SOURCES:
+        ok, note = 0, ""
+        for s in syms:
+            try:
+                df, _ = fn(s, CFG["timeframe"], 100)
+                if df is not None and len(df) >= 60:
+                    ok += 1
+            except Exception as e:
+                if not note:
+                    note = f"{type(e).__name__} {getattr(e, 'code', '')}".strip()
+        print(f"{name:<16}{('yes' if ok else 'NO'):<11}{f'{ok}/{len(syms)}':<18}{note}")
 
 
 # ----------------------------------------------------------------- signal
@@ -298,6 +349,8 @@ def save_state(st):
 # ----------------------------------------------------------------- main
 def main():
     args = set(sys.argv[1:])
+    if "--probe" in args:
+        probe(); return
     dry = "--dry" in args
     status_only = "--status" in args
 
