@@ -38,7 +38,8 @@ python bot.py            # one pass, send new signals
 
 1. Push this folder as the repository root.
 2. Settings → Secrets and variables → Actions → add `TELEGRAM_TOKEN` and `TELEGRAM_CHAT_ID`.
-3. The workflow runs every 15 minutes, and can be started by hand from the Actions tab.
+3. The workflow runs twice after each 4h bar close (00/04/08/12/16/20 UTC) and can
+also be started by hand from the Actions tab.
 
 `config.json` is gitignored; CI falls back to `config.example.json` plus the two secrets.
 

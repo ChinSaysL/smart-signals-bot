@@ -2,9 +2,11 @@ name: Smart Signals
 
 on:
   schedule:
-    # Every 15 minutes. GitHub often delays scheduled runs under load, which is
-    # why bot.py also refuses to alert on a bar older than MAX_BAR_AGE_MIN.
-    - cron: '*/15 * * * *'
+    # 4h bars close at 00/04/08/12/16/20 UTC, so there is nothing to see in
+    # between. Two runs per close: the second is a safety net for GitHub's
+    # habit of delaying scheduled jobs. 12 runs/day instead of 96 keeps this
+    # inside the free Actions allowance for a private repo.
+    - cron: '5,25 0,4,8,12,16,20 * * *'
   workflow_dispatch:        # lets you run it by hand from the Actions tab
     inputs:
       mode:
