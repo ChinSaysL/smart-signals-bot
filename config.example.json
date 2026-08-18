@@ -1,0 +1,15 @@
+{
+  "telegram_token": "",
+  "telegram_chat_id": "",
+  "timeframe": "4h",
+  "market": "futures",
+  "adx_min": 8.5,
+  "trend_filter": true,
+  "atr_len": 7,
+  "sl_atr": 2.0,
+  "tp_atr": 4.0,
+  "cooldown_bars": 1,
+  "alert_on_open_bar": false,
+  "max_bar_age_min": 75,
+  "alert_on_exit": true
+}

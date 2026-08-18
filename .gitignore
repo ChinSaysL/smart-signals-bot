@@ -1,0 +1,6 @@
+config.json
+_config.local.json
+state.json
+bot.log
+crash.log
+__pycache__/

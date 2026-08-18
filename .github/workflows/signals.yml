@@ -1,0 +1,53 @@
+name: Smart Signals
+
+on:
+  schedule:
+    # Every 15 minutes. GitHub often delays scheduled runs under load, which is
+    # why bot.py also refuses to alert on a bar older than MAX_BAR_AGE_MIN.
+    - cron: '*/15 * * * *'
+  workflow_dispatch:        # lets you run it by hand from the Actions tab
+    inputs:
+      mode:
+        description: 'extra flag for bot.py (blank, --status, --dry or --test)'
+        required: false
+        default: ''
+
+concurrency:
+  group: smart-signals      # never let two runs alert at the same time
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      # Carry state.json between runs so a signal is never announced twice.
+      - name: Restore alert state
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: signal-state-${{ github.run_id }}
+          restore-keys: signal-state-
+
+      - name: Scan watchlist
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MAX_BAR_AGE_MIN: '75'
+        run: python bot.py ${{ github.event.inputs.mode }}
+
+      - name: Save alert state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: signal-state-${{ github.run_id }}

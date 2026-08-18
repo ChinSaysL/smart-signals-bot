@@ -1,0 +1,15 @@
+# One Binance symbol per line. Lines starting with # are ignored.
+# TradingView names are accepted too: BINANCE:WLDUSDT.P -> WLDUSDT
+#
+# Top 10 by out-of-sample profit factor, 4h Smart Signals, profitable in BOTH
+# halves of the backtest. Columns: out-of-sample PF | winrate | max drawdown.
+WLDUSDT        # 2.58 | 54.5% | 19%
+DOTUSDT        # 1.96 | 61.4% | 19%
+XRPUSDT        # 1.76 | 49.2% | 15%
+TUTUSDT        # 1.49 | 46.9% | 27%
+BICOUSDT       # 1.48 | 52.5% | 20%
+SUIUSDT        # 1.42 | 45.8% | 27%
+PAXGUSDT       # 1.37 | 55.9% |  6%
+REDUSDT        # 1.33 | 41.7% | 21%
+HOMEUSDT       # 1.28 | 58.2% | 42%
+1000PEPEUSDT   # 1.25 | 44.7% | 24%
