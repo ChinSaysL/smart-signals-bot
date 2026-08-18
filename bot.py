@@ -64,22 +64,69 @@ def load_watchlist():
 
 
 # ----------------------------------------------------------------- data
-def fetch(symbol, interval, limit=400):
-    url = f"{BASE}?symbol={symbol}&interval={interval}&limit={limit}"
+_BYBIT_ITV = {"15m": "15", "30m": "30", "1h": "60", "2h": "120", "4h": "240",
+              "6h": "360", "12h": "720", "1d": "D"}
+_OKX_ITV = {"15m": "15m", "30m": "30m", "1h": "1H", "2h": "2H", "4h": "4H",
+            "6h": "6H", "12h": "12H", "1d": "1D"}
+
+SOURCE_USED = {}      # symbol -> which venue actually answered
+
+
+def _get(url, timeout=25):
     req = urllib.request.Request(url, headers={"User-Agent": "signalbot/1.0"})
-    for attempt in range(4):
-        try:
-            with urllib.request.urlopen(req, timeout=25) as r:
-                k = json.load(r)
-            break
-        except Exception as e:
-            if attempt == 3:
-                raise
-            time.sleep(2 * (attempt + 1))
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
+
+
+def _binance(symbol, interval, limit):
+    k = _get(f"{BASE}?symbol={symbol}&interval={interval}&limit={limit}")
     df = pd.DataFrame(k, columns=["t", "o", "h", "l", "c", "v", "ct", "q", "n", "tb", "tq", "ig"])
-    df = df[["t", "o", "h", "l", "c", "v"]].astype(
-        {"t": "int64", "o": float, "h": float, "l": float, "c": float, "v": float})
-    return df
+    return df[["t", "o", "h", "l", "c", "v"]]
+
+
+def _bybit(symbol, interval, limit):
+    itv = _BYBIT_ITV[interval]
+    d = _get(f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}"
+             f"&interval={itv}&limit={min(limit, 1000)}")
+    rows = d["result"]["list"][::-1]          # Bybit returns newest first
+    return pd.DataFrame([r[:6] for r in rows], columns=["t", "o", "h", "l", "c", "v"])
+
+
+def _okx(symbol, interval, limit):
+    inst = symbol.replace("USDT", "") + "-USDT-SWAP"
+    d = _get(f"https://www.okx.com/api/v5/market/candles?instId={inst}"
+             f"&bar={_OKX_ITV[interval]}&limit={min(limit, 300)}")
+    rows = d["data"][::-1]                    # OKX returns newest first
+    return pd.DataFrame([r[:6] for r in rows], columns=["t", "o", "h", "l", "c", "v"])
+
+
+def fetch(symbol, interval, limit=400):
+    """Binance first (it is what the strategy was tested on), then Bybit, then OKX.
+
+    GitHub-hosted runners sit on US IPs and Binance answers them with HTTP 451,
+    so a fallback is required for this to work anywhere but a local machine.
+    Bybit lists the same USDT perpetuals under the same tickers, so its bars are
+    the closest substitute.
+    """
+    last_err = None
+    for name, fn in (("binance", _binance), ("bybit", _bybit), ("okx", _okx)):
+        for attempt in range(3):
+            try:
+                df = fn(symbol, interval, limit)
+                if df is None or len(df) < 60:
+                    raise ValueError(f"only {0 if df is None else len(df)} bars")
+                df = df.astype({"t": "int64", "o": float, "h": float,
+                                "l": float, "c": float, "v": float})
+                df = df.drop_duplicates("t").sort_values("t").reset_index(drop=True)
+                SOURCE_USED[symbol] = name
+                return df
+            except Exception as e:
+                last_err = f"{name}: {type(e).__name__} {e}"
+                code = getattr(e, "code", None)
+                if code in (451, 403, 401):
+                    break               # geo-blocked, no point retrying this venue
+                time.sleep(1.5 * (attempt + 1))
+    raise RuntimeError(last_err)
 
 
 # ----------------------------------------------------------------- signal
@@ -312,8 +359,14 @@ def main():
     else:
         if not dry:
             save_state(state)
-        log(f"scanned {len(rows)}/{len(syms)} symbols, {len(fired)} new signal(s)"
-            + (f", {len(errors)} error(s)" if errors else ""))
+        elif not os.path.exists(STATE_PATH):
+            save_state(state)      # keep the CI cache step happy on a dry run
+        srcs = {}
+        for v in SOURCE_USED.values():
+            srcs[v] = srcs.get(v, 0) + 1
+        src_txt = ", ".join(f"{k}:{v}" for k, v in sorted(srcs.items())) or "none"
+        log(f"scanned {len(rows)}/{len(syms)} symbols via [{src_txt}], "
+            f"{len(fired)} new signal(s)" + (f", {len(errors)} error(s)" if errors else ""))
     for e in errors:
         log("  " + e)
 
